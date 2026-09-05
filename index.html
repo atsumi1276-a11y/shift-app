@@ -331,8 +331,8 @@
     </div>
 
     <div class="panel">
-      <h2>④ 前月最終休日(連続勤務チェック用)</h2>
-      <div class="legend-note" style="margin-bottom:6px;">各ドライバーの前月最終の公休・希望休日を入力すると、今月最初の休日までの連続勤務日数が6日を超えていないか自動チェックします。</div>
+      <h2>④ 前月最終休日(〇・◎から自動判定)</h2>
+      <div class="legend-note" style="margin-bottom:6px;">入力済みの「〇」「◎」から、前月最終の休日を自動的に判定します(この端末に保存されている過去の入力データを参照します)。今月最初の休日までの連続勤務日数が6日を超える場合、自動で警告します。</div>
       <div id="lastOffList"></div>
     </div>
 
@@ -342,7 +342,8 @@
     <div class="toolbar">
       <h3 id="gridTitle">シフト表</h3>
       <div style="display:flex; gap:8px; align-items:center;">
-        <span class="proto-tag">プロトタイプ:入力内容は保存されません</span>
+        <span class="proto-tag" id="autosaveTag">この端末に自動保存されます</span>
+        <button class="ghost" onclick="runErrorCheck()">エラーチェック</button>
         <button class="ghost" onclick="window.print()">印刷/PDF保存</button>
         <button id="lineShareBtn" onclick="shareToLine()">LINEで共有</button>
         <button id="driveSaveBtn" class="ghost" onclick="createGoogleSheet()">Googleスプレッドシートに保存</button>
@@ -359,8 +360,12 @@
       <b>⚠ ダブルブッキングの可能性があります</b>
       <div id="dupDetail"></div>
     </div>
+    <div class="warning-box" id="monthGapWarning">
+      <b>⚠ 休日の間隔が6日を超えています(月内)</b>
+      <div id="monthGapDetail"></div>
+    </div>
     <div class="warning-box" id="consecWarning">
-      <b>⚠ 連続勤務日数が6日を超えています</b>
+      <b>⚠ 連続勤務日数が6日を超えています(月またぎ)</b>
       <div id="consecDetail"></div>
     </div>
   </div>
@@ -403,6 +408,41 @@ function isHoliday(d) {
 }
 
 let shiftData = {}; // key: `${driverIndex}_${dateStr}` -> value
+
+// ---------- 自動保存(この端末のブラウザに保存) ----------
+const STORAGE_KEY = "aline-shift-app-v1";
+
+function saveState() {
+  try {
+    const state = {
+      drivers,
+      legends,
+      shiftData,
+      periodPattern: document.getElementById("periodPattern").value,
+      baseMonth: document.getElementById("baseMonth").value,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.error("自動保存に失敗しました", e);
+  }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    const state = JSON.parse(raw);
+    if (state.drivers) drivers = state.drivers;
+    if (state.legends) legends = state.legends;
+    if (state.shiftData) shiftData = state.shiftData;
+    if (state.periodPattern) document.getElementById("periodPattern").value = state.periodPattern;
+    if (state.baseMonth) document.getElementById("baseMonth").value = state.baseMonth;
+    return true;
+  } catch (e) {
+    console.error("保存データの読み込みに失敗しました", e);
+    return false;
+  }
+}
 
 // ---------- 期間計算 ----------
 function computePeriod(pattern, baseMonthStr) {
@@ -476,6 +516,7 @@ function render() {
   tbody += "</tbody>";
 
   document.getElementById("shiftTable").innerHTML = thead + tbody;
+  renderLastOffList();
   refreshChecks(dates);
 }
 
@@ -535,8 +576,17 @@ function refreshChecks(datesArg) {
   const pattern = document.getElementById("periodPattern").value;
   const baseMonth = document.getElementById("baseMonth").value;
   const dates = datesArg || computePeriod(pattern, baseMonth).dates;
-  checkDuplicates(dates);
+  // 月またぎの連続勤務チェックのみ自動実行(前月最終休日の入力による判定)
   checkConsecutiveWork(dates);
+  saveState();
+}
+
+function runErrorCheck() {
+  const pattern = document.getElementById("periodPattern").value;
+  const baseMonth = document.getElementById("baseMonth").value;
+  const { dates } = computePeriod(pattern, baseMonth);
+  checkDuplicates(dates);
+  checkMonthlyHolidayGap(dates);
 }
 
 function onCellInput(key, val) {
@@ -544,7 +594,7 @@ function onCellInput(key, val) {
   refreshDuplicates();
 }
 
-// ---------- ダブルブッキング検知 ----------
+// ---------- ダブルブッキング検知(「エラーチェック」ボタンで実行) ----------
 function checkDuplicates(dates) {
   const dupCells = [];
   const dupMessages = [];
@@ -582,22 +632,73 @@ function checkDuplicates(dates) {
     detail.innerHTML = dupMessages.map(m => `・${m}`).join("<br>");
   } else {
     box.classList.remove("show");
+    detail.innerHTML = "";
   }
 }
 
-// ---------- 連続勤務日数チェック(6日超過) ----------
+// ---------- 月内の休日間隔チェック(「エラーチェック」ボタンで実行) ----------
+function checkMonthlyHolidayGap(dates) {
+  const violations = [];
+  const violDriverIdx = new Set();
+
+  drivers.forEach((drv, di) => {
+    const offDates = [];
+    dates.forEach(d => {
+      const key = `${di}_${fmtFull(d)}`;
+      if (OFF_MARKS.includes(shiftData[key])) offDates.push(d);
+    });
+    for (let i = 0; i < offDates.length - 1; i++) {
+      const workingDays = Math.round((offDates[i + 1] - offDates[i]) / 86400000) - 1;
+      if (workingDays > 6) {
+        violDriverIdx.add(di);
+        violations.push({
+          name: drv.name,
+          from: fmtFull(offDates[i]),
+          to: fmtFull(offDates[i + 1]),
+          workingDays,
+        });
+      }
+    }
+  });
+
+  const box = document.getElementById("monthGapWarning");
+  const detail = document.getElementById("monthGapDetail");
+  if (violations.length) {
+    box.classList.add("show");
+    detail.innerHTML = violations
+      .map(v => `・${v.name}: ${v.from} 〜 ${v.to} の間の連続勤務が${v.workingDays}日です`)
+      .join("<br>");
+  } else {
+    box.classList.remove("show");
+    detail.innerHTML = "";
+  }
+}
+
+// ---------- 連続勤務日数チェック(6日超過・月またぎ・自動実行) ----------
 const OFF_MARKS = ["〇", "◎"]; // 公休・希望休のみ対象(DRは対象外)
+
+function findLastOffBeforePeriod(di, periodStart) {
+  const lookbackDays = 60; // これより前のデータは遡らない
+  for (let i = 1; i <= lookbackDays; i++) {
+    const d = new Date(periodStart);
+    d.setDate(d.getDate() - i);
+    const key = `${di}_${fmtFull(d)}`;
+    if (OFF_MARKS.includes(shiftData[key])) return d; // 新しい日付から順に見るので最初に見つかったものが最新
+  }
+  return null;
+}
 
 function checkConsecutiveWork(dates) {
   if (!dates.length) return;
+  const periodStart = dates[0];
   const periodEnd = dates[dates.length - 1];
   const violations = [];
   const violDriverIdx = new Set();
 
   drivers.forEach((drv, di) => {
     document.querySelectorAll(`#name-${di}`).forEach(el => el.classList.remove("name-warn"));
-    if (!drv.lastOff) return;
-    const lastOffDate = new Date(drv.lastOff + "T00:00:00");
+    const lastOffDate = findLastOffBeforePeriod(di, periodStart);
+    if (!lastOffDate) return; // 前月分のデータが無い場合は判定不可のためスキップ
 
     let firstOffInPeriod = null;
     for (const d of dates) {
@@ -612,7 +713,7 @@ function checkConsecutiveWork(dates) {
     } else {
       workingDays = Math.round((periodEnd - lastOffDate) / 86400000);
     }
-    if (workingDays < 0) return; // 前月最終休日が対象期間内の日付など、想定外の入力は無視
+    if (workingDays < 0) return;
 
     if (workingDays > 6) {
       violDriverIdx.add(di);
@@ -642,19 +743,24 @@ function checkConsecutiveWork(dates) {
   }
 }
 
-// ---------- 前月最終休日リスト ----------
+// ---------- 前月最終休日リスト(〇・◎のデータから自動判定・表示のみ) ----------
 function renderLastOffList() {
   const el = document.getElementById("lastOffList");
-  el.innerHTML = drivers.map((d, i) => `
+  const pattern = document.getElementById("periodPattern").value;
+  const baseMonth = document.getElementById("baseMonth").value;
+  if (!baseMonth) return;
+  const { dates } = computePeriod(pattern, baseMonth);
+  const periodStart = dates[0];
+
+  el.innerHTML = drivers.map((d, i) => {
+    const found = findLastOffBeforePeriod(i, periodStart);
+    const label = found ? fmtFull(found) : "データなし";
+    return `
     <div class="list-item">
       <span>${d.name}</span>
-      <input type="date" style="width:140px;" value="${d.lastOff || ""}"
-        onchange="setLastOff(${i}, this.value)">
-    </div>`).join("");
-}
-function setLastOff(i, val) {
-  drivers[i].lastOff = val;
-  refreshChecks();
+      <span class="meta">${label}</span>
+    </div>`;
+  }).join("");
 }
 
 // ---------- ドライバー管理 ----------
@@ -820,16 +926,39 @@ async function createGoogleSheet() {
       const { dates } = computePeriod(pattern, baseMonth);
       const fileName = `シフト表_${baseMonth}`;
 
-      status.innerText = "スプレッドシートを作成しています…";
-      const spreadsheetId = await createSheet(fileName, dates, driveAccessToken);
+      status.innerText = "同名のファイルがないか確認しています…";
+      const existingId = await findExistingSheetId(fileName, driveAccessToken);
 
-      status.innerText = "「佐川急便シフト」フォルダに移動しています…";
-      await moveFileToFolder(spreadsheetId, driveAccessToken);
+      let spreadsheetId;
+      let sheetId;
+
+      if (existingId) {
+        const overwrite = confirm(
+          `Googleドライブの「佐川急便シフト」フォルダに、同名のスプレッドシート「${fileName}」が既にあります。\n上書きしますか?`
+        );
+        if (!overwrite) {
+          status.innerText = "保存を中止しました。";
+          btn.disabled = false;
+          setTimeout(() => { status.style.display = "none"; }, 4000);
+          return;
+        }
+        spreadsheetId = existingId;
+        status.innerText = "既存のスプレッドシートを上書きしています…";
+        sheetId = await getFirstSheetId(spreadsheetId, driveAccessToken);
+        await clearSheetContent(spreadsheetId, sheetId, driveAccessToken);
+      } else {
+        status.innerText = "スプレッドシートを作成しています…";
+        spreadsheetId = await createSheetInFolder(fileName, driveAccessToken);
+        sheetId = await getFirstSheetId(spreadsheetId, driveAccessToken);
+      }
+
+      status.innerText = "内容を書き込んでいます…";
+      await writeSheetContent(spreadsheetId, sheetId, dates, driveAccessToken);
 
       status.innerText = `スプレッドシート「${fileName}」を佐川急便シフトフォルダに保存しました。`;
     } catch (e) {
       console.error(e);
-      status.innerText = "作成に失敗しました。もう一度お試しください。";
+      status.innerText = "保存に失敗しました。もう一度お試しください。";
     } finally {
       btn.disabled = false;
       setTimeout(() => { status.style.display = "none"; }, 8000);
@@ -859,21 +988,69 @@ function buildSheetRows(dates) {
   return { rows, dataStartRow, dataEndRow, colCount: 3 + dates.length };
 }
 
-async function createSheet(title, dates, accessToken) {
-  const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
+async function findExistingSheetId(fileName, accessToken) {
+  const safeName = fileName.replace(/'/g, "\\'");
+  const q = encodeURIComponent(
+    `name='${safeName}' and '${DRIVE_FOLDER_ID}' in parents and trashed=false and mimeType='application/vnd.google-apps.spreadsheet'`
+  );
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error("Drive search failed: " + await res.text());
+  const data = await res.json();
+  return data.files && data.files.length ? data.files[0].id : null;
+}
 
-  // 1. スプレッドシート本体を作成
-  const createRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
+async function createSheetInFolder(fileName, accessToken) {
+  // 佐川急便シフトフォルダの中に、最初から空のスプレッドシートを作成する
+  const res = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: fileName,
+      mimeType: "application/vnd.google-apps.spreadsheet",
+      parents: [DRIVE_FOLDER_ID],
+    }),
+  });
+  if (!res.ok) throw new Error("Drive create failed: " + await res.text());
+  const data = await res.json();
+  return data.id;
+}
+
+async function getFirstSheetId(spreadsheetId, accessToken) {
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) throw new Error("Sheet info failed: " + await res.text());
+  const data = await res.json();
+  return data.sheets[0].properties.sheetId;
+}
+
+async function clearSheetContent(spreadsheetId, sheetId, accessToken) {
+  const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
+  // 既存の値をクリア
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1:BZ2000:clear`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ properties: { title } }),
+    body: JSON.stringify({}),
   });
-  if (!createRes.ok) throw new Error("Sheet create failed: " + await createRes.text());
-  const createData = await createRes.json();
-  const spreadsheetId = createData.spreadsheetId;
-  const sheetId = createData.sheets[0].properties.sheetId;
+  // 既存の結合セルを解除(前回のタイトル結合などが残っていると書式設定でエラーになるため)
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      requests: [
+        { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 } } },
+      ],
+    }),
+  });
+}
 
-  // 2. データを書き込み
+async function writeSheetContent(spreadsheetId, sheetId, dates, accessToken) {
+  const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
+
+  // 1. データを書き込み
   const { rows, dataEndRow, colCount } = buildSheetRows(dates);
   const updateRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`,
@@ -881,7 +1058,7 @@ async function createSheet(title, dates, accessToken) {
   );
   if (!updateRes.ok) throw new Error("Sheet values update failed: " + await updateRes.text());
 
-  // 3. 書式(タイトル結合・見出し固定・見出し色・土日祝の色付け)
+  // 2. 書式(タイトル結合・見出し固定・見出し色・土日祝の色付け)
   const requests = [
     {
       updateSheetProperties: {
@@ -943,20 +1120,6 @@ async function createSheet(title, dates, accessToken) {
     body: JSON.stringify({ requests }),
   });
   if (!formatRes.ok) throw new Error("Sheet format failed: " + await formatRes.text());
-
-  return spreadsheetId;
-}
-
-async function moveFileToFolder(fileId, accessToken) {
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${DRIVE_FOLDER_ID}&removeParents=root&fields=id,parents`,
-    { method: "PATCH", headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error("Drive move failed: " + errText);
-  }
-  return res.json();
 }
 
 // ---------- 初期化 ----------
@@ -964,6 +1127,12 @@ function init() {
   const today = new Date();
   document.getElementById("baseMonth").value =
     `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2,"0")}`;
+
+  const restored = loadState();
+  if (restored) {
+    document.getElementById("autosaveTag").innerText = "この端末の保存内容を復元しました";
+  }
+
   document.getElementById("periodPattern").addEventListener("change", render);
   document.getElementById("baseMonth").addEventListener("change", render);
   renderDriverList();
