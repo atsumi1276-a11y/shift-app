@@ -638,8 +638,9 @@ function checkDuplicates(dates) {
 
 // ---------- 月内の休日間隔チェック(「エラーチェック」ボタンで実行) ----------
 function checkMonthlyHolidayGap(dates) {
+  const periodStart = dates[0];
+  const periodEnd = dates[dates.length - 1];
   const violations = [];
-  const violDriverIdx = new Set();
 
   drivers.forEach((drv, di) => {
     const offDates = [];
@@ -647,17 +648,34 @@ function checkMonthlyHolidayGap(dates) {
       const key = `${di}_${fmtFull(d)}`;
       if (OFF_MARKS.includes(shiftData[key])) offDates.push(d);
     });
+
+    if (offDates.length === 0) {
+      // 休日が1つも入力されていない場合は期間全体をチェック
+      const fullSpan = Math.round((periodEnd - periodStart) / 86400000) + 1;
+      if (fullSpan > 6) {
+        violations.push({ name: drv.name, from: `${fmtFull(periodStart)}(月初)`, to: `${fmtFull(periodEnd)}(月末)`, workingDays: fullSpan });
+      }
+      return;
+    }
+
+    // 月初 → 最初の休日
+    const firstGap = Math.round((offDates[0] - periodStart) / 86400000);
+    if (firstGap > 6) {
+      violations.push({ name: drv.name, from: `${fmtFull(periodStart)}(月初)`, to: fmtFull(offDates[0]), workingDays: firstGap });
+    }
+
+    // 休日同士の間隔
     for (let i = 0; i < offDates.length - 1; i++) {
       const workingDays = Math.round((offDates[i + 1] - offDates[i]) / 86400000) - 1;
       if (workingDays > 6) {
-        violDriverIdx.add(di);
-        violations.push({
-          name: drv.name,
-          from: fmtFull(offDates[i]),
-          to: fmtFull(offDates[i + 1]),
-          workingDays,
-        });
+        violations.push({ name: drv.name, from: fmtFull(offDates[i]), to: fmtFull(offDates[i + 1]), workingDays });
       }
+    }
+
+    // 最後の休日 → 月末
+    const lastGap = Math.round((periodEnd - offDates[offDates.length - 1]) / 86400000);
+    if (lastGap > 6) {
+      violations.push({ name: drv.name, from: fmtFull(offDates[offDates.length - 1]), to: `${fmtFull(periodEnd)}(月末)`, workingDays: lastGap });
     }
   });
 
