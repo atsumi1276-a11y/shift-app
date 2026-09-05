@@ -840,17 +840,23 @@ async function createGoogleSheet() {
 }
 
 function buildSheetRows(dates) {
-  const header = ["担当者", "コース/号車", ...dates.map(d => `${fmt(d)}(${WD[d.getDay()]})`)];
-  const rows = [header];
+  const titleText = `佐川急便八王子シフト ${fmtFull(dates[0])} 〜 ${fmtFull(dates[dates.length - 1])}`;
+  const header = ["担当者", "コース", "号車", ...dates.map(d => `${fmt(d)}(${WD[d.getDay()]})`)];
+  const rows = [[titleText], header];
+
   drivers.forEach((drv, di) => {
-    const row = [drv.name, `${drv.course} / ${drv.no}`];
+    const row = [drv.name, drv.course, drv.no];
     dates.forEach(d => {
       const key = `${di}_${fmtFull(d)}`;
       row.push(shiftData[key] || "");
     });
     rows.push(row);
   });
-  return rows;
+
+  const dataStartRow = 2;
+  const dataEndRow = dataStartRow + drivers.length; // exclusive
+
+  return { rows, dataStartRow, dataEndRow, colCount: 3 + dates.length };
 }
 
 async function createSheet(title, dates, accessToken) {
@@ -868,24 +874,37 @@ async function createSheet(title, dates, accessToken) {
   const sheetId = createData.sheets[0].properties.sheetId;
 
   // 2. データを書き込み
-  const rows = buildSheetRows(dates);
+  const { rows, dataEndRow, colCount } = buildSheetRows(dates);
   const updateRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`,
     { method: "PUT", headers, body: JSON.stringify({ values: rows }) }
   );
   if (!updateRes.ok) throw new Error("Sheet values update failed: " + await updateRes.text());
 
-  // 3. 書式(見出し固定・見出し色・土日祝の色付け)
+  // 3. 書式(タイトル結合・見出し固定・見出し色・土日祝の色付け)
   const requests = [
     {
       updateSheetProperties: {
-        properties: { sheetId, gridProperties: { frozenRowCount: 1, frozenColumnCount: 2 } },
+        properties: { sheetId, gridProperties: { frozenRowCount: 2, frozenColumnCount: 3 } },
         fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+      },
+    },
+    {
+      mergeCells: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: colCount },
+        mergeType: "MERGE_ALL",
       },
     },
     {
       repeatCell: {
         range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+        cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 12 } } },
+        fields: "userEnteredFormat.textFormat",
+      },
+    },
+    {
+      repeatCell: {
+        range: { sheetId, startRowIndex: 1, endRowIndex: 2 },
         cell: {
           userEnteredFormat: {
             backgroundColor: { red: 0.106, green: 0.165, blue: 0.290 },
@@ -897,12 +916,12 @@ async function createSheet(title, dates, accessToken) {
     },
   ];
   dates.forEach((d, i) => {
-    const colIndex = i + 2; // 担当者・コース/号車の2列分オフセット
+    const colIndex = i + 3; // 担当者・コース・号車の3列分オフセット
     const wd = d.getDay();
     if (wd === 6) {
       requests.push({
         repeatCell: {
-          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1 },
+          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1, endRowIndex: dataEndRow },
           cell: { userEnteredFormat: { backgroundColor: { red: 0.918, green: 0.961, blue: 0.984 } } },
           fields: "userEnteredFormat.backgroundColor",
         },
@@ -910,7 +929,7 @@ async function createSheet(title, dates, accessToken) {
     } else if (wd === 0 || isHoliday(d)) {
       requests.push({
         repeatCell: {
-          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1 },
+          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1, endRowIndex: dataEndRow },
           cell: { userEnteredFormat: { backgroundColor: { red: 0.984, green: 0.918, blue: 0.941 } } },
           fields: "userEnteredFormat.backgroundColor",
         },
