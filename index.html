@@ -345,7 +345,7 @@
         <span class="proto-tag">プロトタイプ:入力内容は保存されません</span>
         <button class="ghost" onclick="window.print()">印刷/PDF保存</button>
         <button id="lineShareBtn" onclick="shareToLine()">LINEで共有</button>
-        <button id="driveSaveBtn" class="ghost" onclick="saveToGoogleDrive()">Googleドライブに保存</button>
+        <button id="driveSaveBtn" class="ghost" onclick="createGoogleSheet()">Googleスプレッドシートに保存</button>
       </div>
     </div>
     <div id="shareStatus" style="display:none; margin-bottom:8px; font-size:12px; color:var(--navy); background:#eef1f8; padding:6px 10px; border-radius:4px;"></div>
@@ -776,9 +776,10 @@ async function shareToLine() {
   }
 }
 
-// ---------- Googleドライブ保存 ----------
+// ---------- Googleスプレッドシート保存 ----------
 const GOOGLE_CLIENT_ID = "242646551902-qgqhucdfsl2n3e14839bv982ln54jc6j.apps.googleusercontent.com";
 const DRIVE_FOLDER_ID = "1BmboxXXfCFvIdb0LbVjUZ8cG_S0SpPFv";
+const GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file";
 
 let driveTokenClient = null;
 let driveAccessToken = null;
@@ -787,12 +788,12 @@ function initGoogleAuth() {
   if (driveTokenClient || !window.google || !google.accounts || !google.accounts.oauth2) return;
   driveTokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
-    scope: "https://www.googleapis.com/auth/drive.file",
+    scope: GOOGLE_SCOPES,
     callback: "", // onclickごとに動的に設定
   });
 }
 
-async function saveToGoogleDrive() {
+async function createGoogleSheet() {
   const btn = document.getElementById("driveSaveBtn");
   const status = document.getElementById("shareStatus");
   btn.disabled = true;
@@ -814,15 +815,21 @@ async function saveToGoogleDrive() {
     }
     driveAccessToken = resp.access_token;
     try {
-      status.innerText = "PDFを生成しています…";
-      const blob = await generatePdfBlob();
-      const fileName = `シフト表_${document.getElementById("baseMonth").value}.pdf`;
-      status.innerText = "「佐川急便シフト」フォルダに保存しています…";
-      await uploadToDrive(blob, fileName, driveAccessToken);
-      status.innerText = `「${fileName}」を佐川急便シフトフォルダに保存しました。`;
+      const pattern = document.getElementById("periodPattern").value;
+      const baseMonth = document.getElementById("baseMonth").value;
+      const { dates } = computePeriod(pattern, baseMonth);
+      const fileName = `シフト表_${baseMonth}`;
+
+      status.innerText = "スプレッドシートを作成しています…";
+      const spreadsheetId = await createSheet(fileName, dates, driveAccessToken);
+
+      status.innerText = "「佐川急便シフト」フォルダに移動しています…";
+      await moveFileToFolder(spreadsheetId, driveAccessToken);
+
+      status.innerText = `スプレッドシート「${fileName}」を佐川急便シフトフォルダに保存しました。`;
     } catch (e) {
       console.error(e);
-      status.innerText = "保存に失敗しました。もう一度お試しください。";
+      status.innerText = "作成に失敗しました。もう一度お試しください。";
     } finally {
       btn.disabled = false;
       setTimeout(() => { status.style.display = "none"; }, 8000);
@@ -832,20 +839,103 @@ async function saveToGoogleDrive() {
   driveTokenClient.requestAccessToken({ prompt: driveAccessToken ? "" : "consent" });
 }
 
-async function uploadToDrive(blob, fileName, accessToken) {
-  const metadata = { name: fileName, parents: [DRIVE_FOLDER_ID], mimeType: "application/pdf" };
-  const form = new FormData();
-  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-  form.append("file", blob);
-
-  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}` },
-    body: form,
+function buildSheetRows(dates) {
+  const header = ["担当者", "コース/号車", ...dates.map(d => `${fmt(d)}(${WD[d.getDay()]})`)];
+  const rows = [header];
+  drivers.forEach((drv, di) => {
+    const row = [drv.name, `${drv.course} / ${drv.no}`];
+    dates.forEach(d => {
+      const key = `${di}_${fmtFull(d)}`;
+      row.push(shiftData[key] || "");
+    });
+    rows.push(row);
   });
+  return rows;
+}
+
+async function createSheet(title, dates, accessToken) {
+  const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
+
+  // 1. スプレッドシート本体を作成
+  const createRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ properties: { title } }),
+  });
+  if (!createRes.ok) throw new Error("Sheet create failed: " + await createRes.text());
+  const createData = await createRes.json();
+  const spreadsheetId = createData.spreadsheetId;
+  const sheetId = createData.sheets[0].properties.sheetId;
+
+  // 2. データを書き込み
+  const rows = buildSheetRows(dates);
+  const updateRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`,
+    { method: "PUT", headers, body: JSON.stringify({ values: rows }) }
+  );
+  if (!updateRes.ok) throw new Error("Sheet values update failed: " + await updateRes.text());
+
+  // 3. 書式(見出し固定・見出し色・土日祝の色付け)
+  const requests = [
+    {
+      updateSheetProperties: {
+        properties: { sheetId, gridProperties: { frozenRowCount: 1, frozenColumnCount: 2 } },
+        fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+      },
+    },
+    {
+      repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.106, green: 0.165, blue: 0.290 },
+            textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true },
+          },
+        },
+        fields: "userEnteredFormat(backgroundColor,textFormat)",
+      },
+    },
+  ];
+  dates.forEach((d, i) => {
+    const colIndex = i + 2; // 担当者・コース/号車の2列分オフセット
+    const wd = d.getDay();
+    if (wd === 6) {
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1 },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.918, green: 0.961, blue: 0.984 } } },
+          fields: "userEnteredFormat.backgroundColor",
+        },
+      });
+    } else if (wd === 0 || isHoliday(d)) {
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1 },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.984, green: 0.918, blue: 0.941 } } },
+          fields: "userEnteredFormat.backgroundColor",
+        },
+      });
+    }
+  });
+
+  const formatRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ requests }),
+  });
+  if (!formatRes.ok) throw new Error("Sheet format failed: " + await formatRes.text());
+
+  return spreadsheetId;
+}
+
+async function moveFileToFolder(fileId, accessToken) {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${DRIVE_FOLDER_ID}&removeParents=root&fields=id,parents`,
+    { method: "PATCH", headers: { Authorization: `Bearer ${accessToken}` } }
+  );
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error("Drive upload failed: " + errText);
+    throw new Error("Drive move failed: " + errText);
   }
   return res.json();
 }
