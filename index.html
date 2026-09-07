@@ -1045,12 +1045,34 @@ const GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.
 let driveTokenClient = null;
 let driveAccessToken = null;
 
+// Googleの認証は https:// か http://localhost のページからしか利用できない。
+// file:// で開いた場合は origin が null として送られ、Googleの同意画面が401になる。
+function googleOriginIssue() {
+  const p = location.protocol;
+  if (p === "https:") return null;
+  if (p === "http:" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return null;
+  if (p === "file:") {
+    return "このページはファイル(file://)として直接開かれているため、Googleスプレッドシートへの保存は利用できません。"
+      + "Googleの認証は https:// または http://localhost のページからのみ許可されています。";
+  }
+  return `このページのアドレス(${location.origin})ではGoogleの認証を利用できません。`
+    + "https:// または http://localhost で開き直してください。";
+}
+
 function initGoogleAuth() {
   if (driveTokenClient || !window.google || !google.accounts || !google.accounts.oauth2) return;
   driveTokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
     scope: GOOGLE_SCOPES,
     callback: "", // onclickごとに動的に設定
+    error_callback: (err) => {
+      // 未登録のオリジンなど、Google側で弾かれた場合はここに来る
+      const status = document.getElementById("shareStatus");
+      status.style.display = "block";
+      status.innerText = `Googleの認証が拒否されました(${err && err.type ? err.type : "不明なエラー"})。`
+        + `Google Cloud Consoleの「承認済みのJavaScript生成元」に ${location.origin} が登録されているか確認してください。`;
+      document.getElementById("driveSaveBtn").disabled = false;
+    },
   });
 }
 
@@ -1059,6 +1081,14 @@ async function createGoogleSheet() {
   const status = document.getElementById("shareStatus");
   btn.disabled = true;
   status.style.display = "block";
+
+  const originIssue = googleOriginIssue();
+  if (originIssue) {
+    status.innerText = originIssue;
+    btn.disabled = false;
+    return;
+  }
+
   status.innerText = "Googleにログインしています…";
 
   initGoogleAuth();
@@ -1075,6 +1105,7 @@ async function createGoogleSheet() {
       return;
     }
     driveAccessToken = resp.access_token;
+    let failed = true;
     try {
       const pattern = document.getElementById("periodPattern").value;
       const baseMonth = document.getElementById("baseMonth").value;
@@ -1111,16 +1142,42 @@ async function createGoogleSheet() {
       await writeSheetContent(spreadsheetId, sheetId, dates, driveAccessToken);
 
       status.innerText = `スプレッドシート「${fileName}」を佐川急便シフトフォルダに保存しました。`;
+      failed = false;
     } catch (e) {
       console.error(e);
-      status.innerText = "保存に失敗しました。もう一度お試しください。";
+      status.innerText = "保存に失敗しました: " + describeApiError(e);
     } finally {
       btn.disabled = false;
-      setTimeout(() => { status.style.display = "none"; }, 8000);
+      // 失敗時はメッセージを読む時間が要るので長めに表示する
+      setTimeout(() => { status.style.display = "none"; }, failed ? 30000 : 8000);
     }
   };
 
   driveTokenClient.requestAccessToken({ prompt: driveAccessToken ? "" : "consent" });
+}
+
+// Google APIのエラーは JSON が本文に入ってくるので、原因の一文だけを取り出す
+function describeApiError(e) {
+  const raw = (e && e.message) ? e.message : String(e);
+  const brace = raw.indexOf("{");
+  if (brace >= 0) {
+    try {
+      const j = JSON.parse(raw.slice(brace));
+      if (j.error && j.error.message) return j.error.message;
+    } catch (_) { /* JSONでなければ元の文字列を使う */ }
+  }
+  return raw.length > 300 ? raw.slice(0, 300) + "…" : raw;
+}
+
+// 列番号(1始まり)をA1記法の列名に変換する
+function colLetter(n) {
+  let s = "";
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
 
 function buildSheetRows(dates) {
@@ -1184,89 +1241,182 @@ async function getFirstSheetId(spreadsheetId, accessToken) {
 
 async function clearSheetContent(spreadsheetId, sheetId, accessToken) {
   const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
-  // 既存の値をクリア
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1:BZ2000:clear`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({}),
-  });
-  // 既存の結合セルを解除(前回のタイトル結合などが残っていると書式設定でエラーになるため)
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+  // range に sheetId だけを渡すとシート全体が対象になる。
+  // 行数・列数を決め打ちすると、シートより広い範囲を指定した時点でエラーになるため使わない。
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
     method: "POST",
     headers,
     body: JSON.stringify({
       requests: [
-        { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 } } },
+        // 前回のタイトル結合が残っていると、次の結合でエラーになる
+        { unmergeCells: { range: { sheetId } } },
+        // 値と書式の両方を消す(前回が31日の月だと、余った列に色が残るため)
+        { updateCells: { range: { sheetId }, fields: "userEnteredValue,userEnteredFormat" } },
       ],
     }),
   });
+  if (!res.ok) throw new Error("Sheet clear failed: " + await res.text());
 }
+
+// 画面の配色に合わせたスプレッドシート用の色
+const SHEET_COLORS = {
+  header:   { red: 0.106, green: 0.165, blue: 0.290 }, // #1b2a4a 見出し
+  satHead:  { red: 0.290, green: 0.498, blue: 0.710 }, // #4a7fb5 土曜の見出し
+  sunHead:  { red: 0.710, green: 0.416, blue: 0.502 }, // #b56a80 日祝の見出し
+  sat:      { red: 0.918, green: 0.961, blue: 0.984 }, // #eaf5fb 土曜(薄い水色)
+  sun:      { red: 0.984, green: 0.918, blue: 0.941 }, // #fbeaf0 日祝(薄いピンク)
+};
+
+// A4横1枚に収めるための列幅(px)
+const SHEET_WIDTHS = { name: 90, course: 78, no: 42, day: 30 };
 
 async function writeSheetContent(spreadsheetId, sheetId, dates, accessToken) {
   const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
-
-  // 1. データを書き込み
   const { rows, dataEndRow, colCount } = buildSheetRows(dates);
+
+  // 1. 先にシートの行数・列数を必要な大きさに合わせる。
+  //    新規シートは既定26列しかないため、31日分(34列)を書式設定しようとすると
+  //    「Range exceeds grid limits」で失敗する。
+  const resizeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      requests: [{
+        updateSheetProperties: {
+          properties: { sheetId, gridProperties: { rowCount: rows.length, columnCount: colCount } },
+          fields: "gridProperties.rowCount,gridProperties.columnCount",
+        },
+      }],
+    }),
+  });
+  if (!resizeRes.ok) throw new Error("Sheet resize failed: " + await resizeRes.text());
+
+  // 2. データを書き込み(範囲は明示する。"A1"だけだと書き込み範囲外エラーになる場合がある)
+  const range = `A1:${colLetter(colCount)}${rows.length}`;
   const updateRes = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=RAW`,
     { method: "PUT", headers, body: JSON.stringify({ values: rows }) }
   );
   if (!updateRes.ok) throw new Error("Sheet values update failed: " + await updateRes.text());
 
-  // 2. 書式(タイトル結合・見出し固定・見出し色・土日祝の色付け)
+  // 3. 書式
+  const all = (startRowIndex, endRowIndex, startColumnIndex, endColumnIndex) =>
+    ({ sheetId, startRowIndex, endRowIndex, startColumnIndex, endColumnIndex });
+
   const requests = [
+    // 見出し行・左3列を固定(印刷時にページをまたいでも繰り返される)
     {
       updateSheetProperties: {
         properties: { sheetId, gridProperties: { frozenRowCount: 2, frozenColumnCount: 3 } },
         fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
       },
     },
+    // タイトル行
     {
-      mergeCells: {
-        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: colCount },
-        mergeType: "MERGE_ALL",
-      },
+      mergeCells: { range: all(0, 1, 0, colCount), mergeType: "MERGE_ALL" },
     },
     {
       repeatCell: {
-        range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+        range: all(0, 1, 0, colCount),
         cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 12 } } },
         fields: "userEnteredFormat.textFormat",
       },
     },
+    // 見出し行
     {
       repeatCell: {
-        range: { sheetId, startRowIndex: 1, endRowIndex: 2 },
+        range: all(1, 2, 0, colCount),
         cell: {
           userEnteredFormat: {
-            backgroundColor: { red: 0.106, green: 0.165, blue: 0.290 },
-            textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true },
+            backgroundColor: SHEET_COLORS.header,
+            textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 8 },
+            horizontalAlignment: "CENTER",
+            verticalAlignment: "MIDDLE",
+            wrapStrategy: "WRAP",
           },
         },
-        fields: "userEnteredFormat(backgroundColor,textFormat)",
+        fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+      },
+    },
+    // データ行全体
+    {
+      repeatCell: {
+        range: all(2, dataEndRow, 0, colCount),
+        cell: {
+          userEnteredFormat: {
+            textFormat: { fontSize: 9 },
+            verticalAlignment: "MIDDLE",
+            wrapStrategy: "WRAP",
+          },
+        },
+        fields: "userEnteredFormat(textFormat,verticalAlignment,wrapStrategy)",
+      },
+    },
+    // コース列は文字数が多いので一段小さく
+    {
+      repeatCell: {
+        range: all(2, dataEndRow, 1, 2),
+        cell: { userEnteredFormat: { textFormat: { fontSize: 8 } } },
+        fields: "userEnteredFormat.textFormat",
+      },
+    },
+    // 号車と日付セルは中央揃え
+    {
+      repeatCell: {
+        range: all(2, dataEndRow, 2, colCount),
+        cell: { userEnteredFormat: { horizontalAlignment: "CENTER" } },
+        fields: "userEnteredFormat.horizontalAlignment",
+      },
+    },
+    // 列幅(A4横に収まる幅にする)
+    {
+      updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 },
+        properties: { pixelSize: SHEET_WIDTHS.name }, fields: "pixelSize",
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
+        properties: { pixelSize: SHEET_WIDTHS.course }, fields: "pixelSize",
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 2, endIndex: 3 },
+        properties: { pixelSize: SHEET_WIDTHS.no }, fields: "pixelSize",
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: colCount },
+        properties: { pixelSize: SHEET_WIDTHS.day }, fields: "pixelSize",
       },
     },
   ];
+
+  // 土日祝の色付け。見出し行とデータ行で濃さを変える(画面と同じ配色)
   dates.forEach((d, i) => {
-    const colIndex = i + 3; // 担当者・コース・号車の3列分オフセット
+    const col = i + 3; // 担当者・コース・号車の3列分オフセット
     const wd = d.getDay();
-    if (wd === 6) {
-      requests.push({
-        repeatCell: {
-          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1, endRowIndex: dataEndRow },
-          cell: { userEnteredFormat: { backgroundColor: { red: 0.918, green: 0.961, blue: 0.984 } } },
-          fields: "userEnteredFormat.backgroundColor",
-        },
-      });
-    } else if (wd === 0 || isHoliday(d)) {
-      requests.push({
-        repeatCell: {
-          range: { sheetId, startColumnIndex: colIndex, endColumnIndex: colIndex + 1, startRowIndex: 1, endRowIndex: dataEndRow },
-          cell: { userEnteredFormat: { backgroundColor: { red: 0.984, green: 0.918, blue: 0.941 } } },
-          fields: "userEnteredFormat.backgroundColor",
-        },
-      });
-    }
+    const isSun = wd === 0 || isHoliday(d);
+    if (!isSun && wd !== 6) return;
+    const headColor = isSun ? SHEET_COLORS.sunHead : SHEET_COLORS.satHead;
+    const bodyColor = isSun ? SHEET_COLORS.sun : SHEET_COLORS.sat;
+    requests.push({
+      repeatCell: {
+        range: all(1, 2, col, col + 1),
+        cell: { userEnteredFormat: { backgroundColor: headColor } },
+        fields: "userEnteredFormat.backgroundColor",
+      },
+    });
+    requests.push({
+      repeatCell: {
+        range: all(2, dataEndRow, col, col + 1),
+        cell: { userEnteredFormat: { backgroundColor: bodyColor } },
+        fields: "userEnteredFormat.backgroundColor",
+      },
+    });
   });
 
   const formatRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
