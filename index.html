@@ -1181,9 +1181,12 @@ function colLetter(n) {
 }
 
 function buildSheetRows(dates) {
-  const titleText = `佐川急便八王子シフト ${fmtFull(dates[0])} 〜 ${fmtFull(dates[dates.length - 1])}`;
+  // 固定列(左3列)と非固定列にまたがるセル結合はGoogle側で拒否されるため、
+  // タイトルを「名称」と「期間」に分け、境界をまたがない2つの結合として扱う
+  const titleName = "佐川急便八王子シフト";
+  const titlePeriod = `${fmtFull(dates[0])} 〜 ${fmtFull(dates[dates.length - 1])}`;
   const header = ["担当者", "コース", "号車", ...dates.map(d => `${fmt(d)}(${WD[d.getDay()]})`)];
-  const rows = [[titleText], header];
+  const rows = [[titleName, "", "", titlePeriod], header];
 
   drivers.forEach((drv, di) => {
     const row = [drv.name, drv.course, drv.no];
@@ -1311,9 +1314,12 @@ async function writeSheetContent(spreadsheetId, sheetId, dates, accessToken) {
         fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
       },
     },
-    // タイトル行
+    // タイトル行。固定列(0〜2)と非固定列(3〜)をまたぐ結合はGoogleに拒否されるため2つに分ける
     {
-      mergeCells: { range: all(0, 1, 0, colCount), mergeType: "MERGE_ALL" },
+      mergeCells: { range: all(0, 1, 0, 3), mergeType: "MERGE_ALL" },
+    },
+    {
+      mergeCells: { range: all(0, 1, 3, colCount), mergeType: "MERGE_ALL" },
     },
     {
       repeatCell: {
