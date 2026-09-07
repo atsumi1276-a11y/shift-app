@@ -159,7 +159,7 @@
     font-weight: 600;
     padding: 5px 2px;
     font-size: 11px;
-    min-width: 46px;
+    min-width: 52px; /* セルのプルダウンで略語2文字が隠れない幅 */
   }
   thead th.corner1 { left: 0; z-index: 4; min-width: 150px; }
   thead th.corner2 { left: 150px; z-index: 4; min-width: 90px; }
@@ -192,6 +192,7 @@
     font-size: 11.5px;
     background: transparent;
     color: var(--ink);
+    padding: 0 2px; /* 既定の左右7pxを詰めて表示できる文字数を稼ぐ */
   }
   td.cell select:focus { outline: 2px solid var(--navy-light); outline-offset: -2px; }
   td.cell .custom-input {
