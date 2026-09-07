@@ -372,6 +372,14 @@
 </div>
 
 <script>
+// ---------- 共通ユーティリティ ----------
+// 入力値をHTMLに埋め込む際は必ずこれを通す(「<」「&」「"」等による表示崩れ・データ破損を防ぐ)
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 // ---------- 状態管理 ----------
 let drivers = [
   { name: "清水龍明", course: "代走", no: "719" },
@@ -396,15 +404,93 @@ let legends = [
 
 const SPECIAL = ["〇", "◎", "DR"]; // 公休・希望休・休み(集計対象外)
 
-// 2026年(令和8年)国民の祝日・休日
-const JP_HOLIDAYS_2026 = [
-  "2026/01/01","2026/01/12","2026/02/11","2026/02/23","2026/03/20",
-  "2026/04/29","2026/05/03","2026/05/04","2026/05/05","2026/05/06",
-  "2026/07/20","2026/08/11","2026/09/21","2026/09/22","2026/09/23",
-  "2026/10/12","2026/11/03","2026/11/23",
-];
+// ---------- 国民の祝日(年ごとに自動計算) ----------
+// 現行の祝日法(2022年以降の並び)に基づき、振替休日・国民の休日も含めて算出します。
+// 春分・秋分は近似式のため 1980〜2099年 の範囲で有効です。
+// 特別措置法などで祝日が移動した年は、下の HOLIDAY_OVERRIDES に追記してください。
+const HOLIDAY_OVERRIDES = {
+  2020: { remove: ["海の日", "スポーツの日", "山の日"],
+          add: { "7/23": "海の日", "7/24": "スポーツの日", "8/10": "山の日" } },
+  2021: { remove: ["海の日", "スポーツの日", "山の日"],
+          add: { "7/22": "海の日", "7/23": "スポーツの日", "8/8": "山の日" } },
+};
+
+function nthWeekdayOfMonth(y, m, weekday, nth) {
+  const first = new Date(y, m - 1, 1);
+  const offset = (weekday - first.getDay() + 7) % 7;
+  return new Date(y, m - 1, 1 + offset + (nth - 1) * 7);
+}
+
+function equinoxDay(y, isSpring) {
+  const base = isSpring ? 20.8431 : 23.2488;
+  return Math.floor(base + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+}
+
+const holidayCache = {};
+
+function jpHolidays(y) {
+  if (holidayCache[y]) return holidayCache[y];
+  const D = (m, d) => new Date(y, m - 1, d);
+
+  let list = [
+    [D(1, 1), "元日"],
+    [nthWeekdayOfMonth(y, 1, 1, 2), "成人の日"],
+    [D(2, 11), "建国記念の日"],
+    [D(2, 23), "天皇誕生日"],
+    [D(3, equinoxDay(y, true)), "春分の日"],
+    [D(4, 29), "昭和の日"],
+    [D(5, 3), "憲法記念日"],
+    [D(5, 4), "みどりの日"],
+    [D(5, 5), "こどもの日"],
+    [nthWeekdayOfMonth(y, 7, 1, 3), "海の日"],
+    [D(8, 11), "山の日"],
+    [nthWeekdayOfMonth(y, 9, 1, 3), "敬老の日"],
+    [D(9, equinoxDay(y, false)), "秋分の日"],
+    [nthWeekdayOfMonth(y, 10, 1, 2), "スポーツの日"],
+    [D(11, 3), "文化の日"],
+    [D(11, 23), "勤労感謝の日"],
+  ];
+
+  const ov = HOLIDAY_OVERRIDES[y];
+  if (ov) {
+    list = list.filter(([, name]) => !ov.remove.includes(name));
+    Object.entries(ov.add).forEach(([md, name]) => {
+      const [m, d] = md.split("/").map(Number);
+      list.push([D(m, d), name]);
+    });
+  }
+
+  const map = new Map(); // "YYYY/MM/DD" -> 祝日名
+  list.forEach(([d, name]) => map.set(fmtFull(d), name));
+
+  // 国民の休日: 前後を祝日に挟まれた、日曜でも祝日でもない日(例: 9月のシルバーウィーク)
+  const baseDates = new Set(list.map(([d]) => fmtFull(d)));
+  list.forEach(([d]) => {
+    const cand = new Date(d);
+    cand.setDate(cand.getDate() + 1);
+    if (cand.getDay() === 0 || baseDates.has(fmtFull(cand))) return;
+    const next = new Date(cand);
+    next.setDate(next.getDate() + 1);
+    if (baseDates.has(fmtFull(next))) map.set(fmtFull(cand), "国民の休日");
+  });
+
+  // 振替休日: 祝日が日曜と重なった場合、その後の最初の「祝日でない日」
+  list.forEach(([d]) => {
+    if (d.getDay() !== 0) return;
+    const sub = new Date(d);
+    do { sub.setDate(sub.getDate() + 1); } while (map.has(fmtFull(sub)));
+    map.set(fmtFull(sub), "振替休日");
+  });
+
+  holidayCache[y] = map;
+  return map;
+}
+
 function isHoliday(d) {
-  return JP_HOLIDAYS_2026.includes(fmtFull(d));
+  return jpHolidays(d.getFullYear()).has(fmtFull(d));
+}
+function holidayName(d) {
+  return jpHolidays(d.getFullYear()).get(fmtFull(d)) || "";
 }
 
 let shiftData = {}; // key: `${driverIndex}_${dateStr}` -> value
@@ -494,8 +580,10 @@ function render() {
   let thead = `<thead><tr><th class="corner1">担当者</th><th class="corner2">コース/号車</th>`;
   dates.forEach(d => {
     const wd = d.getDay();
-    const cls = (wd === 0 || isHoliday(d)) ? "sun" : wd === 6 ? "sat" : "";
-    thead += `<th class="${cls}">${fmt(d)}<span class="wd">${WD[wd]}</span></th>`;
+    const hol = holidayName(d);
+    const cls = (wd === 0 || hol) ? "sun" : wd === 6 ? "sat" : "";
+    const title = hol ? ` title="${esc(hol)}"` : "";
+    thead += `<th class="${cls}"${title}>${fmt(d)}<span class="wd">${WD[wd]}</span></th>`;
   });
   thead += `</tr></thead>`;
 
@@ -503,7 +591,7 @@ function render() {
   const options = buildOptionList();
   let tbody = "<tbody>";
   drivers.forEach((drv, di) => {
-    tbody += `<tr><td class="col-name" id="name-${di}">${drv.name}</td><td class="col-course">${drv.course}<br>${drv.no}</td>`;
+    tbody += `<tr><td class="col-name" id="name-${di}">${esc(drv.name)}</td><td class="col-course">${esc(drv.course)}<br>${esc(drv.no)}</td>`;
     dates.forEach(d => {
       const key = `${di}_${fmtFull(d)}`;
       const val = shiftData[key] || "";
@@ -537,15 +625,15 @@ function cellHtml(key, val, options) {
   const isCustom = val && !SPECIAL.includes(val) && !options.includes(val);
   let opts = `<option value=""></option>`;
   opts += `<optgroup label="特殊">` +
-    SPECIAL.map(s => `<option value="${s}" ${s === val ? "selected" : ""}>${s}</option>`).join("") +
+    SPECIAL.map(s => `<option value="${esc(s)}" ${s === val ? "selected" : ""}>${esc(s)}</option>`).join("") +
     `</optgroup>`;
   opts += `<optgroup label="コース">` +
-    options.map(o => `<option value="${o}" ${o === val ? "selected" : ""}>${o}</option>`).join("") +
+    options.map(o => `<option value="${esc(o)}" ${o === val ? "selected" : ""}>${esc(o)}</option>`).join("") +
     `</optgroup>`;
   opts += `<option value="__custom__" ${isCustom ? "selected" : ""}>＋自由入力</option>`;
   return `
     <select onchange="onCellSelect('${key}', this)">${opts}</select>
-    <input type="text" class="custom-input" value="${isCustom ? val : ""}"
+    <input type="text" class="custom-input" value="${isCustom ? esc(val) : ""}"
       placeholder="入力" style="display:${isCustom ? "block" : "none"}"
       oninput="onCellInput('${key}', this.value)">
   `;
@@ -612,8 +700,8 @@ function checkDuplicates(dates) {
     Object.entries(courseMap).forEach(([course, list]) => {
       if (list.length > 1) {
         list.forEach(di => dupCells.push(`${di}_${dateStr}`));
-        const names = list.map(i => drivers[i].name).join("・");
-        dupMessages.push(`${fmt(d)}(${WD[d.getDay()]}) 「${course}」に ${names} が重複しています`);
+        const names = list.map(i => esc(drivers[i].name)).join("・");
+        dupMessages.push(`${fmt(d)}(${WD[d.getDay()]}) 「${esc(course)}」に ${names} が重複しています`);
       }
     });
   });
@@ -684,7 +772,7 @@ function checkMonthlyHolidayGap(dates) {
   if (violations.length) {
     box.classList.add("show");
     detail.innerHTML = violations
-      .map(v => `・${v.name}: ${v.from} 〜 ${v.to} の間の連続勤務が${v.workingDays}日です`)
+      .map(v => `・${esc(v.name)}: ${v.from} 〜 ${v.to} の間の連続勤務が${v.workingDays}日です`)
       .join("<br>");
   } else {
     box.classList.remove("show");
@@ -754,7 +842,7 @@ function checkConsecutiveWork(dates) {
   if (violations.length) {
     box.classList.add("show");
     detail.innerHTML = violations.map(v =>
-      `・${v.name}: 前月最終休日 ${v.lastOff} 〜 次の休日 ${v.nextOff}(連続勤務 ${v.workingDays}日)`
+      `・${esc(v.name)}: 前月最終休日 ${v.lastOff} 〜 次の休日 ${v.nextOff}(連続勤務 ${v.workingDays}日)`
     ).join("<br>");
   } else {
     box.classList.remove("show");
@@ -775,7 +863,7 @@ function renderLastOffList() {
     const label = found ? fmtFull(found) : "データなし";
     return `
     <div class="list-item">
-      <span>${d.name}</span>
+      <span>${esc(d.name)}</span>
       <span class="meta">${label}</span>
     </div>`;
   }).join("");
@@ -805,7 +893,7 @@ function renderDriverList() {
   const el = document.getElementById("driverList");
   el.innerHTML = drivers.map((d, i) => `
     <div class="list-item">
-      <span>${d.name} <span class="meta">(${d.course} / ${d.no})</span></span>
+      <span>${esc(d.name)} <span class="meta">(${esc(d.course)} / ${esc(d.no)})</span></span>
       <button class="small danger" onclick="removeDriver(${i})">削除</button>
     </div>`).join("");
 }
@@ -830,7 +918,7 @@ function renderLegendList() {
   const el = document.getElementById("legendList");
   el.innerHTML = legends.map((l, i) => `
     <div class="list-item">
-      <span>${l.abbr} <span class="meta">= ${l.full}</span></span>
+      <span>${esc(l.abbr)} <span class="meta">= ${esc(l.full)}</span></span>
       <button class="small danger" onclick="removeLegend(${i})">削除</button>
     </div>`).join("");
 }
