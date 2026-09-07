@@ -199,6 +199,7 @@
     font-size: 11px;
     border-top: 1px dashed var(--line);
   }
+  td.cell .cell-print { display: none; } /* 印刷時のみ表示する値のテキスト */
   td.cell.holiday { background: var(--holiday); }
   td.cell.req-holiday { background: var(--req-holiday); }
   td.cell.dup { background: var(--warn-bg); }
@@ -260,26 +261,64 @@
   #lineShareBtn:disabled { opacity: 0.6; cursor: default; }
 
   @media print {
-    @page { size: A4 landscape; margin: 8mm; }
+    @page { size: A4 landscape; margin: 6mm; }
+    /* 土日祝・警告色などの背景をプリンタに出力させる(既定では省略されるため) */
+    * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
     body { background: #fff; font-size: 9px; }
-    header, .sidebar, .toolbar, .warning-box { display: none !important; }
+    header, .sidebar, .toolbar, .warning-box, #shareStatus { display: none !important; }
     .layout { display: block; }
     .main { padding: 0; overflow: visible; }
-    .main > div[style] { max-height: none !important; overflow: visible !important; border: none !important; }
+    /* 画面用のスクロール枠を解除しないと、見えている範囲しか印刷されない */
+    #captureArea, #tableScroll {
+      max-height: none !important;
+      overflow: visible !important;
+      border: none !important;
+    }
     #printTitle {
       display: block;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
-      margin-bottom: 6px;
+      margin-bottom: 5px;
     }
-    table.shift { width: 100%; font-size: 8.5px; }
-    thead th { position: static; padding: 3px 1px; }
-    thead th.corner1, thead th.corner2 { position: static; }
-    .col-name, .col-course { position: static; }
-    .col-name { min-width: auto; padding: 3px 5px !important; }
-    .col-course { min-width: auto; font-size: 8px; padding: 3px 3px !important; }
-    td.cell input, td.cell select { height: 16px; font-size: 8.5px; }
-    td.cell .custom-input:placeholder-shown { display: none !important; }
+    /* 用紙幅に収めるため、列幅を固定して日付列へ均等配分する */
+    table.shift {
+      width: 100%;
+      table-layout: fixed;
+      font-size: 8px;
+    }
+    tr { break-inside: avoid; }
+    thead th {
+      position: static;
+      min-width: 0;
+      padding: 2px 0;
+      font-size: 7.5px;
+      line-height: 1.25;
+    }
+    thead th.corner1 { position: static; width: 64px; }
+    thead th.corner2 { position: static; width: 48px; }
+    thead .wd { font-size: 7px; }
+    .col-name, .col-course {
+      position: static;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      line-height: 1.25;
+    }
+    .col-name { padding: 2px 4px !important; font-size: 8px; }
+    .col-course { padding: 2px 3px !important; font-size: 7px; }
+    /* フォーム部品ではなく値のテキストを印刷する。
+       プルダウンの矢印や「＋自由入力」の文字が出ず、長い値も折り返せる。 */
+    td.cell select, td.cell input { display: none !important; }
+    td.cell .cell-print {
+      display: block;
+      font-size: 7.5px;
+      line-height: 1.35;
+      padding: 1px;
+      min-height: 13px;
+      word-break: break-all;
+    }
   }
 </style>
 </head>
@@ -635,7 +674,8 @@ function cellHtml(key, val, options) {
     <select onchange="onCellSelect('${key}', this)">${opts}</select>
     <input type="text" class="custom-input" value="${isCustom ? esc(val) : ""}"
       placeholder="入力" style="display:${isCustom ? "block" : "none"}"
-      oninput="onCellInput('${key}', this.value)">
+      oninput="onCellInput('${key}', this)">
+    <span class="cell-print">${esc(val)}</span>
   `;
 }
 
@@ -653,7 +693,14 @@ function onCellSelect(key, selectEl) {
     customInput.value = "";
     shiftData[key] = val;
   }
+  setPrintText(td, shiftData[key]);
   refreshDuplicates();
+}
+
+// 印刷用テキストを実際の値に追従させる
+function setPrintText(td, val) {
+  const el = td.querySelector(".cell-print");
+  if (el) el.textContent = val || "";
 }
 
 function refreshDuplicates() {
@@ -677,8 +724,9 @@ function runErrorCheck() {
   checkMonthlyHolidayGap(dates);
 }
 
-function onCellInput(key, val) {
-  shiftData[key] = val;
+function onCellInput(key, inputEl) {
+  shiftData[key] = inputEl.value;
+  setPrintText(inputEl.closest("td"), inputEl.value);
   refreshDuplicates();
 }
 
