@@ -99,6 +99,37 @@
   }
   .list-item .meta { color: var(--sub); font-size: 11px; }
 
+  /* ドライバー一覧の並び替え(ドラッグ&ドロップ) */
+  .driver-item { cursor: grab; }
+  .driver-item:active { cursor: grabbing; }
+  .driver-item .drag-handle {
+    color: var(--sub);
+    font-size: 13px;
+    line-height: 1;
+    user-select: none;
+    flex-shrink: 0;
+  }
+  .driver-item .driver-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .driver-item .driver-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .driver-item .move {
+    padding: 2px 5px;
+    font-size: 10px;
+    line-height: 1.4;
+  }
+  .driver-item.dragging { opacity: 0.4; }
+  .driver-item.drop-before { box-shadow: inset 0 2px 0 0 var(--navy); }
+  .driver-item.drop-after { box-shadow: inset 0 -2px 0 0 var(--navy); }
+
   .period-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -338,6 +369,7 @@
       </div>
       <button onclick="addDriver()" style="width:100%">追加</button>
       <div id="driverList" style="margin-top:8px;"></div>
+      <div class="legend-note">行をドラッグするか、▲▼ボタンで並び順を変更できます。シフト表の行順・印刷・スプレッドシート出力の順序もこれに従います。入力済みのシフトは担当者についてそのまま移動します。</div>
     </div>
 
     <div class="panel">
@@ -900,11 +932,49 @@ function renderLastOffList() {
 }
 
 // ---------- ドライバー管理 ----------
+// shiftDataのキーは `${ドライバーの並び順}_${日付}` のため、並びが変わると担当者とシフトの対応がずれる。
+// map: 旧index -> 新index (null なら破棄)。mapに無いキーは持ち主が居ないので捨てる。
+function reindexShiftData(map) {
+  const next = {};
+  Object.entries(shiftData).forEach(([key, val]) => {
+    const sep = key.indexOf("_");
+    const oldIdx = Number(key.slice(0, sep));
+    if (!map.has(oldIdx)) return;
+    const newIdx = map.get(oldIdx);
+    if (newIdx === null) return;
+    next[`${newIdx}_${key.slice(sep + 1)}`] = val;
+  });
+  shiftData = next;
+}
+
+function moveDriver(from, to) {
+  if (from === to) return;
+  if (from < 0 || to < 0 || from >= drivers.length || to >= drivers.length) return;
+
+  const order = drivers.map((_, i) => i);
+  const [moved] = order.splice(from, 1);
+  order.splice(to, 0, moved);
+
+  const map = new Map();
+  order.forEach((oldIdx, newIdx) => map.set(oldIdx, newIdx));
+  reindexShiftData(map);
+  drivers = order.map(i => drivers[i]);
+
+  renderDriverList();
+  renderLastOffList();
+  render();
+}
+
 function addDriver() {
   const name = document.getElementById("drvName").value.trim();
   const course = document.getElementById("drvCourse").value.trim();
   const no = document.getElementById("drvNo").value.trim();
   if (!name) return;
+  // 過去に削除されたドライバーの残骸が同じ番号で残っていると引き継いでしまうため消しておく
+  const newIdx = drivers.length;
+  Object.keys(shiftData).forEach(k => {
+    if (k.startsWith(`${newIdx}_`)) delete shiftData[k];
+  });
   drivers.push({ name, course, no, lastOff: "" });
   document.getElementById("drvName").value = "";
   document.getElementById("drvCourse").value = "";
@@ -914,6 +984,14 @@ function addDriver() {
   render();
 }
 function removeDriver(i) {
+  // 削除した人のシフトは破棄し、後ろの人のシフトを1つ前へ詰める
+  const map = new Map();
+  drivers.forEach((_, oldIdx) => {
+    if (oldIdx === i) map.set(oldIdx, null);
+    else map.set(oldIdx, oldIdx > i ? oldIdx - 1 : oldIdx);
+  });
+  reindexShiftData(map);
+
   drivers.splice(i, 1);
   renderDriverList();
   renderLastOffList();
@@ -922,10 +1000,86 @@ function removeDriver(i) {
 function renderDriverList() {
   const el = document.getElementById("driverList");
   el.innerHTML = drivers.map((d, i) => `
-    <div class="list-item">
-      <span>${esc(d.name)} <span class="meta">(${esc(d.course)} / ${esc(d.no)})</span></span>
-      <button class="small danger" onclick="removeDriver(${i})">削除</button>
+    <div class="list-item driver-item" draggable="true" data-index="${i}"
+      ondragstart="onDriverDragStart(event, ${i})"
+      ondragover="onDriverDragOver(event)"
+      ondragleave="onDriverDragLeave(event)"
+      ondrop="onDriverDrop(event, ${i})"
+      ondragend="onDriverDragEnd()">
+      <span class="driver-label">
+        <span class="drag-handle" aria-hidden="true">⠿</span>
+        <span>${esc(d.name)} <span class="meta">(${esc(d.course)} / ${esc(d.no)})</span></span>
+      </span>
+      <span class="driver-actions">
+        <button class="small ghost move move-up" draggable="false" aria-label="上へ移動" title="上へ移動"
+          onclick="moveDriverBy(${i}, -1)" ${i === 0 ? "disabled" : ""}>▲</button>
+        <button class="small ghost move move-down" draggable="false" aria-label="下へ移動" title="下へ移動"
+          onclick="moveDriverBy(${i}, 1)" ${i === drivers.length - 1 ? "disabled" : ""}>▼</button>
+        <button class="small danger" draggable="false" onclick="removeDriver(${i})">削除</button>
+      </span>
     </div>`).join("");
+}
+
+// ▲▼ボタン用。タッチ端末ではドラッグ&ドロップが使えないため、こちらで並び替える。
+function moveDriverBy(i, delta) {
+  const to = i + delta;
+  if (to < 0 || to >= drivers.length) return;
+  moveDriver(i, to);
+  // 続けて押せるよう、移動先の同じボタンにフォーカスを移す
+  const item = document.querySelectorAll("#driverList .driver-item")[to];
+  const btn = item && item.querySelector(delta < 0 ? ".move-up" : ".move-down");
+  if (btn && !btn.disabled) btn.focus();
+}
+
+// ---------- ドライバー一覧の並び替え ----------
+let dragFromIndex = null;
+
+// 行の上半分に重ねたら手前、下半分なら後ろに挿入する
+function isDropAfter(e) {
+  const rect = e.currentTarget.getBoundingClientRect();
+  return (e.clientY - rect.top) > rect.height / 2;
+}
+
+function clearDropMarks() {
+  document.querySelectorAll("#driverList .driver-item").forEach(el =>
+    el.classList.remove("drop-before", "drop-after", "dragging"));
+}
+
+function onDriverDragStart(e, i) {
+  dragFromIndex = i;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", String(i)); // Firefoxはこれが無いとドラッグが始まらない
+  e.currentTarget.classList.add("dragging");
+}
+
+function onDriverDragOver(e) {
+  if (dragFromIndex === null) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  const after = isDropAfter(e);
+  e.currentTarget.classList.toggle("drop-before", !after);
+  e.currentTarget.classList.toggle("drop-after", after);
+}
+
+function onDriverDragLeave(e) {
+  e.currentTarget.classList.remove("drop-before", "drop-after");
+}
+
+function onDriverDrop(e, i) {
+  e.preventDefault();
+  const after = isDropAfter(e);
+  clearDropMarks();
+  if (dragFromIndex === null) return;
+  let to = after ? i + 1 : i;
+  if (dragFromIndex < to) to -= 1; // 自分を抜いた分だけ後ろが詰まる
+  const from = dragFromIndex;
+  dragFromIndex = null;
+  moveDriver(from, to);
+}
+
+function onDriverDragEnd() {
+  dragFromIndex = null;
+  clearDropMarks();
 }
 
 // ---------- 凡例管理 ----------
