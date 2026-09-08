@@ -121,11 +121,14 @@
     gap: 4px;
     flex-shrink: 0;
   }
-  .driver-item .move {
+  .driver-item .move,
+  .driver-item .sep-toggle {
     padding: 2px 5px;
     font-size: 10px;
     line-height: 1.4;
   }
+  .driver-item .sep-toggle.on { background: var(--navy); color: #fff; }
+  .driver-item.has-sep { border-bottom: 2px solid var(--navy-light); }
   .driver-item.dragging { opacity: 0.4; }
   .driver-item.drop-before { box-shadow: inset 0 2px 0 0 var(--navy); }
   .driver-item.drop-after { box-shadow: inset 0 -2px 0 0 var(--navy); }
@@ -242,6 +245,14 @@
     font-size: 11px;
     border-top: 1px dashed var(--line);
   }
+  /* グループを区切る空行 */
+  tr.sep-row td {
+    height: 10px;
+    padding: 0 !important;
+    background: #e9edf3;
+  }
+  tr.sep-row .col-name, tr.sep-row .col-course { background: #e9edf3; }
+
   td.cell .cell-print { display: none; } /* 印刷時のみ表示する値のテキスト */
   td.cell.holiday { background: var(--holiday); }
   td.cell.req-holiday { background: var(--req-holiday); }
@@ -669,6 +680,11 @@ function render() {
       tbody += `<td class="cell ${colCls}" data-key="${key}">${cellHtml(key, val, options)}</td>`;
     });
     tbody += `</tr>`;
+    // グループを区切る空行。左2列は固定列と同じ構成にして横スクロール時もずれないようにする
+    if (drv.sepAfter) {
+      tbody += `<tr class="sep-row"><td class="col-name"></td><td class="col-course"></td>` +
+        dates.map(() => "<td></td>").join("") + `</tr>`;
+    }
   });
   tbody += "</tbody>";
 
@@ -1051,7 +1067,7 @@ function removeDriver(i) {
 function renderDriverList() {
   const el = document.getElementById("driverList");
   el.innerHTML = drivers.map((d, i) => `
-    <div class="list-item driver-item" draggable="true" data-index="${i}"
+    <div class="list-item driver-item${d.sepAfter ? " has-sep" : ""}" draggable="true" data-index="${i}"
       ondragstart="onDriverDragStart(event, ${i})"
       ondragover="onDriverDragOver(event)"
       ondragleave="onDriverDragLeave(event)"
@@ -1062,6 +1078,9 @@ function renderDriverList() {
         <span>${esc(d.name)} <span class="meta">(${esc(d.course)} / ${esc(d.no)})</span></span>
       </span>
       <span class="driver-actions">
+        <button class="small ghost sep-toggle${d.sepAfter ? " on" : ""}" draggable="false"
+          aria-pressed="${d.sepAfter ? "true" : "false"}" title="この下に区切りの空行を入れる/外す"
+          onclick="toggleSeparator(${i})">区切</button>
         <button class="small ghost move move-up" draggable="false" aria-label="上へ移動" title="上へ移動"
           onclick="moveDriverBy(${i}, -1)" ${i === 0 ? "disabled" : ""}>▲</button>
         <button class="small ghost move move-down" draggable="false" aria-label="下へ移動" title="下へ移動"
@@ -1069,6 +1088,16 @@ function renderDriverList() {
         <button class="small danger" draggable="false" onclick="removeDriver(${i})">削除</button>
       </span>
     </div>`).join("");
+}
+
+// この担当者の下に区切りの空行を入れる/外す。
+// フラグを担当者自身に持たせているので、並び替えると区切りも一緒に移動する。
+function toggleSeparator(i) {
+  const drv = drivers[i];
+  if (!drv) return;
+  drv.sepAfter = !drv.sepAfter;
+  renderDriverList();
+  render();
 }
 
 // ▲▼ボタン用。タッチ端末ではドラッグ&ドロップが使えないため、こちらで並び替える。
@@ -1312,6 +1341,7 @@ function buildSheetRows(dates) {
   const header = ["担当者", "コース", "号車", ...dates.map(d => `${fmt(d)}(${WD[d.getDay()]})`)];
   const rows = [[titleName, "", "", titlePeriod], header];
 
+  const separatorRows = [];
   drivers.forEach((drv, di) => {
     const row = [drv.name, drv.course, drv.no];
     dates.forEach(d => {
@@ -1319,12 +1349,16 @@ function buildSheetRows(dates) {
       row.push(shiftData[key] || "");
     });
     rows.push(row);
+    if (drv.sepAfter) {
+      separatorRows.push(rows.length); // これから足す空行の行番号(0始まり)
+      rows.push([]);
+    }
   });
 
   const dataStartRow = 2;
-  const dataEndRow = dataStartRow + drivers.length; // exclusive
+  const dataEndRow = rows.length; // exclusive。区切りの空行も含む
 
-  return { rows, dataStartRow, dataEndRow, colCount: 3 + dates.length };
+  return { rows, dataStartRow, dataEndRow, separatorRows, colCount: 3 + dates.length };
 }
 
 async function findExistingSheetId(fileName, accessToken) {
@@ -1403,7 +1437,7 @@ const SHEET_WIDTHS = { name: 90, course: 78, no: 42, day: 30 };
 
 async function writeSheetContent(spreadsheetId, sheetId, dates, accessToken) {
   const headers = { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" };
-  const { rows, dataEndRow, colCount } = buildSheetRows(dates);
+  const { rows, dataEndRow, separatorRows, colCount } = buildSheetRows(dates);
 
   // 1. 先にシートの行数・列数を必要な大きさに合わせる。
   //    新規シートは既定26列しかないため、31日分(34列)を書式設定しようとすると
@@ -1549,6 +1583,23 @@ async function writeSheetContent(spreadsheetId, sheetId, dates, accessToken) {
         range: all(2, dataEndRow, col, col + 1),
         cell: { userEnteredFormat: { backgroundColor: bodyColor } },
         fields: "userEnteredFormat.backgroundColor",
+      },
+    });
+  });
+
+  // 区切りの空行。土日祝の色より後に積んで上書きする
+  separatorRows.forEach(r => {
+    requests.push({
+      repeatCell: {
+        range: all(r, r + 1, 0, colCount),
+        cell: { userEnteredFormat: { backgroundColor: { red: 0.914, green: 0.929, blue: 0.953 } } },
+        fields: "userEnteredFormat.backgroundColor",
+      },
+    });
+    requests.push({
+      updateDimensionProperties: {
+        range: { sheetId, dimension: "ROWS", startIndex: r, endIndex: r + 1 },
+        properties: { pixelSize: 10 }, fields: "pixelSize",
       },
     });
   });
