@@ -4,8 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>シフト作成支援ツール(プロトタイプ)</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
@@ -89,6 +87,7 @@
   button.small { padding: 3px 7px; font-size: 11px; }
   button.danger { background: #fff; color: var(--warn); border-color: var(--warn); }
   button.danger:hover { background: var(--warn-bg); }
+  button:disabled { opacity: 0.6; cursor: default; }
 
   .list-item {
     display: flex;
@@ -243,24 +242,6 @@
 
   #printTitle { display: none; }
 
-  #captureArea.pdf-capture #printTitle {
-    display: block;
-    font-size: 16px;
-    font-weight: 700;
-    margin-bottom: 8px;
-  }
-  #captureArea.pdf-capture #tableScroll {
-    max-height: none !important;
-    overflow: visible !important;
-  }
-  #captureArea.pdf-capture table.shift thead th,
-  #captureArea.pdf-capture .col-name,
-  #captureArea.pdf-capture .col-course {
-    position: static !important;
-  }
-
-  #lineShareBtn:disabled { opacity: 0.6; cursor: default; }
-
   @media print {
     @page { size: A4 landscape; margin: 6mm; }
     /* 土日祝・警告色などの背景をプリンタに出力させる(既定では省略されるため) */
@@ -385,8 +366,8 @@
         <span class="proto-tag" id="autosaveTag">この端末に自動保存されます</span>
         <button class="ghost" onclick="runErrorCheck()">エラーチェック</button>
         <button class="ghost" onclick="window.print()">印刷/PDF保存</button>
-        <button id="lineShareBtn" onclick="shareToLine()">LINEで共有</button>
         <button id="driveSaveBtn" class="ghost" onclick="createGoogleSheet()">Googleスプレッドシートに保存</button>
+        <button id="driveLoadBtn" class="ghost" onclick="loadFromGoogleSheet()">Googleスプレッドシートから反映</button>
       </div>
     </div>
     <div id="shareStatus" style="display:none; margin-bottom:8px; font-size:12px; color:var(--navy); background:#eef1f8; padding:6px 10px; border-radius:4px;"></div>
@@ -972,71 +953,6 @@ function renderLegendList() {
     </div>`).join("");
 }
 
-// ---------- PDF生成 & LINE共有 ----------
-async function generatePdfBlob() {
-  const area = document.getElementById("captureArea");
-  area.classList.add("pdf-capture");
-  try {
-    const canvas = await html2canvas(area, { scale: 2, backgroundColor: "#ffffff" });
-    const imgData = canvas.toDataURL("image/png");
-    const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
-    const pageW = pdf.internal.pageSize.getWidth();
-    const pageH = pdf.internal.pageSize.getHeight();
-    const props = pdf.getImageProperties(imgData);
-    const ratio = Math.min(pageW / props.width, pageH / props.height);
-    const w = props.width * ratio;
-    const h = props.height * ratio;
-    pdf.addImage(imgData, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
-    return pdf.output("blob");
-  } finally {
-    area.classList.remove("pdf-capture");
-  }
-}
-
-async function shareToLine() {
-  const btn = document.getElementById("lineShareBtn");
-  const status = document.getElementById("shareStatus");
-  btn.disabled = true;
-  status.style.display = "block";
-  status.innerText = "PDFを生成しています…";
-
-  try {
-    const blob = await generatePdfBlob();
-    const fileName = `シフト表_${document.getElementById("baseMonth").value}.pdf`;
-    const file = new File([blob], fileName, { type: "application/pdf" });
-
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      status.innerText = "共有メニューを開いています…";
-      await navigator.share({
-        files: [file],
-        title: "シフト表",
-        text: "シフト表を共有します",
-      });
-      status.innerText = "共有メニューを閉じました。";
-    } else {
-      // 共有APIに対応していない環境(主にPC)向けフォールバック
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      a.click();
-      URL.revokeObjectURL(url);
-      status.innerText = "この端末はLINEへの直接共有に対応していないため、PDFをダウンロードしました。LINEアプリから手動で送信してください。";
-    }
-  } catch (e) {
-    if (e && e.name === "AbortError") {
-      status.innerText = "共有をキャンセルしました。";
-    } else {
-      status.innerText = "PDFの生成に失敗しました。もう一度お試しください。";
-      console.error(e);
-    }
-  } finally {
-    btn.disabled = false;
-    setTimeout(() => { status.style.display = "none"; }, 6000);
-  }
-}
-
 // ---------- Googleスプレッドシート保存 ----------
 const GOOGLE_CLIENT_ID = "242646551902-qgqhucdfsl2n3e14839bv982ln54jc6j.apps.googleusercontent.com";
 const DRIVE_FOLDER_ID = "1BmboxXXfCFvIdb0LbVjUZ8cG_S0SpPFv";
@@ -1071,7 +987,10 @@ function initGoogleAuth() {
       status.style.display = "block";
       status.innerText = `Googleの認証が拒否されました(${err && err.type ? err.type : "不明なエラー"})。`
         + `Google Cloud Consoleの「承認済みのJavaScript生成元」に ${location.origin} が登録されているか確認してください。`;
-      document.getElementById("driveSaveBtn").disabled = false;
+      ["driveSaveBtn", "driveLoadBtn"].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) b.disabled = false;
+      });
     },
   });
 }
@@ -1232,14 +1151,18 @@ async function createSheetInFolder(fileName, accessToken) {
   return data.id;
 }
 
-async function getFirstSheetId(spreadsheetId, accessToken) {
+async function getFirstSheetProps(spreadsheetId, accessToken) {
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   if (!res.ok) throw new Error("Sheet info failed: " + await res.text());
   const data = await res.json();
-  return data.sheets[0].properties.sheetId;
+  return data.sheets[0].properties;
+}
+
+async function getFirstSheetId(spreadsheetId, accessToken) {
+  return (await getFirstSheetProps(spreadsheetId, accessToken)).sheetId;
 }
 
 async function clearSheetContent(spreadsheetId, sheetId, accessToken) {
@@ -1431,6 +1354,158 @@ async function writeSheetContent(spreadsheetId, sheetId, dates, accessToken) {
     body: JSON.stringify({ requests }),
   });
   if (!formatRes.ok) throw new Error("Sheet format failed: " + await formatRes.text());
+}
+
+// ---------- Googleスプレッドシートから反映 ----------
+// 保存時と同じ構成(1行目=タイトル / 2行目=見出し / 3行目以降=担当者ごとの行)を前提に読み取る。
+
+async function readSheetValues(spreadsheetId, sheetTitle, accessToken) {
+  // 範囲にシート名だけを渡すと、そのシートの入力済み範囲すべてが返る
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTitle)}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) throw new Error("Sheet read failed: " + await res.text());
+  const data = await res.json();
+  return data.values || [];
+}
+
+// 読み取った表を shiftData に反映する。対象期間はいったん全消去してから入れ直す。
+// 行は並び順ではなく担当者名で対応付ける(シート側で並べ替えられていても崩れないようにするため)。
+function applySheetValues(values, dates) {
+  const header = values.length > 1 ? values[1] : [];
+  if ((header[0] || "").trim() !== "担当者") {
+    throw new Error("このスプレッドシートはシフト表の形式ではありません(2行目の先頭が「担当者」ではありません)。");
+  }
+
+  // 見出しの日付ラベルを、画面の対象期間の日付に突き合わせる
+  const dateByLabel = new Map(dates.map(d => [`${fmt(d)}(${WD[d.getDay()]})`, d]));
+  const colToDate = new Map();
+  for (let c = 3; c < header.length; c++) {
+    const d = dateByLabel.get((header[c] || "").trim());
+    if (d) colToDate.set(c, d);
+  }
+
+  const indexByName = new Map();
+  drivers.forEach((drv, di) => {
+    const n = drv.name.trim();
+    if (!indexByName.has(n)) indexByName.set(n, di);
+  });
+
+  // 対象期間を全消去(「全て置き換える」ため)
+  drivers.forEach((drv, di) => {
+    dates.forEach(d => { delete shiftData[`${di}_${fmtFull(d)}`]; });
+  });
+
+  let applied = 0;
+  const matched = new Set();
+  const unknownNames = [];
+  for (let r = 2; r < values.length; r++) {
+    const row = values[r] || [];
+    const name = (row[0] || "").trim();
+    if (!name) continue;
+    if (!indexByName.has(name)) { unknownNames.push(name); continue; }
+    const di = indexByName.get(name);
+    matched.add(di);
+    colToDate.forEach((d, c) => {
+      const v = (row[c] || "").trim();
+      if (!v) return;
+      shiftData[`${di}_${fmtFull(d)}`] = v;
+      applied++;
+    });
+  }
+
+  return {
+    applied,
+    matchedDrivers: matched.size,
+    clearedDrivers: drivers.length - matched.size,
+    unknownNames: [...new Set(unknownNames)],
+    missingDates: dates.length - colToDate.size,
+  };
+}
+
+async function loadFromGoogleSheet() {
+  const btn = document.getElementById("driveLoadBtn");
+  const status = document.getElementById("shareStatus");
+  btn.disabled = true;
+  status.style.display = "block";
+
+  const originIssue = googleOriginIssue();
+  if (originIssue) {
+    status.innerText = originIssue;
+    btn.disabled = false;
+    return;
+  }
+
+  status.innerText = "Googleにログインしています…";
+
+  initGoogleAuth();
+  if (!driveTokenClient) {
+    status.innerText = "Google連携の読み込みに失敗しました。ページを再読み込みしてから、もう一度お試しください。";
+    btn.disabled = false;
+    return;
+  }
+
+  driveTokenClient.callback = async (resp) => {
+    if (resp.error) {
+      status.innerText = "Googleへのログインがキャンセルされました。";
+      btn.disabled = false;
+      return;
+    }
+    driveAccessToken = resp.access_token;
+    let failed = true;
+    try {
+      const pattern = document.getElementById("periodPattern").value;
+      const baseMonth = document.getElementById("baseMonth").value;
+      const { dates } = computePeriod(pattern, baseMonth);
+      const fileName = `シフト表_${baseMonth}`;
+
+      status.innerText = `「${fileName}」を探しています…`;
+      const spreadsheetId = await findExistingSheetId(fileName, driveAccessToken);
+      if (!spreadsheetId) {
+        failed = false;
+        status.innerText = `「${fileName}」が佐川急便シフトフォルダに見つかりませんでした。①シフト期間の設定をご確認ください。`;
+        return;
+      }
+
+      const proceed = confirm(
+        `「${fileName}」の内容で、対象期間(${fmtFull(dates[0])} 〜 ${fmtFull(dates[dates.length - 1])})のシフトを置き換えます。\n`
+        + "画面に入力されている同じ期間の内容は失われます。よろしいですか?"
+      );
+      if (!proceed) {
+        failed = false;
+        status.innerText = "反映を中止しました。";
+        return;
+      }
+
+      status.innerText = "内容を読み込んでいます…";
+      const props = await getFirstSheetProps(spreadsheetId, driveAccessToken);
+      const values = await readSheetValues(spreadsheetId, props.title, driveAccessToken);
+      const r = applySheetValues(values, dates);
+      render();
+
+      let msg = `「${fileName}」から ${r.applied}件を反映しました(担当者${r.matchedDrivers}名)。`;
+      if (r.unknownNames.length) {
+        msg += ` シート側の「${r.unknownNames.join("・")}」は②ドライバー登録に無いため取り込んでいません。`;
+      }
+      if (r.clearedDrivers) {
+        msg += ` 画面の担当者${r.clearedDrivers}名はシートに行が無いため、対象期間が空になりました。`;
+      }
+      if (r.missingDates) {
+        msg += ` ${r.missingDates}日分はシートの見出しと一致しませんでした。`;
+      }
+      status.innerText = msg;
+      failed = false;
+    } catch (e) {
+      console.error(e);
+      status.innerText = "反映に失敗しました: " + describeApiError(e);
+    } finally {
+      btn.disabled = false;
+      setTimeout(() => { status.style.display = "none"; }, failed ? 30000 : 15000);
+    }
+  };
+
+  driveTokenClient.requestAccessToken({ prompt: driveAccessToken ? "" : "consent" });
 }
 
 // ---------- 初期化 ----------
