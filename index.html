@@ -170,6 +170,18 @@
     border-left: 4px solid var(--warn);
     color: var(--warn);
   }
+  .col-name .name-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .row-reset {
+    padding: 2px 6px;
+    font-size: 10px;
+    font-weight: 400;
+    flex-shrink: 0;
+  }
   .col-course {
     position: sticky;
     left: 150px;
@@ -324,6 +336,7 @@
     /* フォーム部品ではなく値のテキストを印刷する。
        プルダウンの矢印や「＋自由入力」の文字が出ず、長い値も折り返せる。 */
     td.cell select, td.cell input { display: none !important; }
+    .row-reset { display: none !important; }
     td.cell .cell-print {
       display: block;
       font-size: 7.5px;
@@ -397,7 +410,7 @@
       <div style="display:flex; gap:8px; align-items:center;">
         <span class="proto-tag" id="autosaveTag">この端末に自動保存されます</span>
         <button class="ghost" onclick="runErrorCheck()">エラーチェック</button>
-        <button class="ghost" onclick="window.print()">印刷/PDF保存</button>
+        <button class="ghost" onclick="window.print()">印刷</button>
         <button id="driveSaveBtn" class="ghost" onclick="createGoogleSheet()">Googleスプレッドシートに保存</button>
         <button id="driveLoadBtn" class="ghost" onclick="loadFromGoogleSheet()">Googleスプレッドシートから反映</button>
       </div>
@@ -644,7 +657,10 @@ function render() {
   const options = buildOptionList();
   let tbody = "<tbody>";
   drivers.forEach((drv, di) => {
-    tbody += `<tr><td class="col-name" id="name-${di}">${esc(drv.name)}</td><td class="col-course">${esc(drv.course)}<br>${esc(drv.no)}</td>`;
+    tbody += `<tr><td class="col-name" id="name-${di}"><span class="name-row"><span>${esc(drv.name)}</span>` +
+      `<button class="small ghost row-reset" onclick="resetDriverShifts(${di})"` +
+      ` title="この担当者の対象期間の入力を消去" aria-label="${esc(drv.name)}の入力をリセット">リセット</button>` +
+      `</span></td><td class="col-course">${esc(drv.course)}<br>${esc(drv.no)}</td>`;
     dates.forEach(d => {
       const key = `${di}_${fmtFull(d)}`;
       const val = shiftData[key] || "";
@@ -736,6 +752,41 @@ function runErrorCheck() {
   const { dates } = computePeriod(pattern, baseMonth);
   checkDuplicates(dates);
   checkMonthlyHolidayGap(dates);
+}
+
+// 表の上のメッセージ欄に一時的に表示する
+function showStatus(text, ms = 5000) {
+  const el = document.getElementById("shareStatus");
+  el.style.display = "block";
+  el.innerText = text;
+  clearTimeout(showStatus.timer);
+  showStatus.timer = setTimeout(() => { el.style.display = "none"; }, ms);
+}
+
+// 担当者1名分の入力を、表示中の対象期間だけ消去する(前月以前のデータは残す)
+function resetDriverShifts(di) {
+  const drv = drivers[di];
+  if (!drv) return;
+  const pattern = document.getElementById("periodPattern").value;
+  const baseMonth = document.getElementById("baseMonth").value;
+  if (!baseMonth) return;
+  const { start, end, dates } = computePeriod(pattern, baseMonth);
+
+  const filled = dates.filter(d => shiftData[`${di}_${fmtFull(d)}`]);
+  if (!filled.length) {
+    showStatus(`${drv.name} の対象期間には入力がありません。`);
+    return;
+  }
+
+  const proceed = confirm(
+    `${drv.name} の ${fmtFull(start)} 〜 ${fmtFull(end)} の入力(${filled.length}件)を消去します。\n`
+    + "この操作は取り消せません。よろしいですか?"
+  );
+  if (!proceed) return;
+
+  dates.forEach(d => { delete shiftData[`${di}_${fmtFull(d)}`]; });
+  render();
+  showStatus(`${drv.name} の入力(${filled.length}件)を消去しました。`);
 }
 
 function onCellInput(key, inputEl) {
