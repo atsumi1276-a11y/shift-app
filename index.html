@@ -245,6 +245,12 @@
     font-size: 11px;
     border-top: 1px dashed var(--line);
   }
+  td.empty-row {
+    padding: 22px 14px !important;
+    color: var(--sub);
+    text-align: center;
+  }
+
   /* グループを区切る空行 */
   tr.sep-row td {
     height: 10px;
@@ -458,16 +464,9 @@ function esc(s) {
 }
 
 // ---------- 状態管理 ----------
-let drivers = [
-  { name: "清水龍明", course: "代走", no: "719" },
-  { name: "萩原健太", course: "代走", no: "9921" },
-  { name: "秋山純一", course: "上川、川口 上", no: "706" },
-  { name: "清水幸雄", course: "楢原", no: "721" },
-  { name: "石川潤一", course: "中野上", no: "717" },
-  { name: "宮川樹", course: "中野山王", no: "709" },
-  { name: "安田徹", course: "諏訪、上壱分方", no: "705" },
-  { name: "福井崇", course: "叶谷", no: "700" },
-];
+// 担当者は「②ドライバー登録」から追加し、この端末のブラウザ(localStorage)に保存されます。
+// 個人情報をこのファイルに書かないでください。ファイルを配布・共有した際に一緒に流出します。
+let drivers = [];
 
 let legends = [
   { abbr: "川ォ", full: "川口ALL、上川" },
@@ -686,6 +685,10 @@ function render() {
         dates.map(() => "<td></td>").join("") + `</tr>`;
     }
   });
+  if (!drivers.length) {
+    tbody += `<tr><td class="empty-row" colspan="${2 + dates.length}">` +
+      `左の「②ドライバー登録」から担当者を追加してください。</td></tr>`;
+  }
   tbody += "</tbody>";
 
   document.getElementById("shiftTable").innerHTML = thead + tbody;
@@ -1242,6 +1245,13 @@ async function createGoogleSheet() {
     return;
   }
 
+  // 担当者が0名だと見出しだけのシートになり、書式設定がGoogle側で弾かれる
+  if (!drivers.length) {
+    status.innerText = "担当者が登録されていません。「②ドライバー登録」から追加してから保存してください。";
+    btn.disabled = false;
+    return;
+  }
+
   status.innerText = "Googleにログインしています…";
 
   initGoogleAuth();
@@ -1689,6 +1699,13 @@ async function loadFromGoogleSheet() {
   const originIssue = googleOriginIssue();
   if (originIssue) {
     status.innerText = originIssue;
+    btn.disabled = false;
+    return;
+  }
+
+  // 行の対応付けは氏名で行うため、登録が0名だと何も取り込めない
+  if (!drivers.length) {
+    status.innerText = "担当者が登録されていません。「②ドライバー登録」でシートと同じ氏名を登録してから反映してください。";
     btn.disabled = false;
     return;
   }
